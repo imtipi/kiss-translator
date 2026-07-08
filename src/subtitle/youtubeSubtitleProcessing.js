@@ -44,6 +44,13 @@ export function cleanTimedText(utf8 = "") {
       // 当前异常 timedtext 中实际污染字幕的是 U+200B 零宽空格。
       // 这里只移除 U+200B，避免误删 U+200C/U+200D 等对部分语言文字成形有意义的字符。
       .replace(/\u200B/g, "")
+      // ASR 噪声词元：[Music]/[Applause] 等括号标签（含各语言变体）与孤立音符。
+      // 它们混进断句输入会让模型在句中切断，纯标签 seg 还会以独立 cue 与语音
+      // 重叠上屏；清空后的 seg 保留为时间断点，正好充当停顿信号。
+      // >> 说话人标记是统计断句的边界信号（sentenceBreaker.startsWithArrow），
+      // 这里必须保留，只在 AI 断句输入侧剥离。
+      .replace(/\[[^\]]*\]/g, " ")
+      .replace(/[♪♫]+/g, " ")
       .trim()
       .replace(/\s+/g, " ")
   );

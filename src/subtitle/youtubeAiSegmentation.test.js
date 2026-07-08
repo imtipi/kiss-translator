@@ -351,6 +351,39 @@ describe("createAiChunkScheduler", () => {
   });
 });
 
+describe("aiSegment input cleanup", () => {
+  test("strips speaker markers from AI input and drops emptied tokens", async () => {
+    const chunkEvents = [
+      { start: 0, end: 1000, text: ">> hello" },
+      { start: 1000, end: 2000, text: ">>" },
+      { start: 2000, end: 3000, text: "world" },
+    ];
+    const apiSubtitle = jest.fn(() =>
+      Promise.resolve([
+        { start: 0, end: 3000, text: "hello world", _si: 0, _ei: 1 },
+      ])
+    );
+
+    await aiSegment({
+      videoId: "v",
+      fromLang: "en",
+      toLang: "zh-CN",
+      segApiSetting: {},
+      docInfo: {},
+      formatSubtitles: jest.fn(() => []),
+      clearSegmentTranslation: false,
+      setting: {},
+      chunkEvents,
+      apiSubtitle,
+    });
+
+    expect(apiSubtitle.mock.calls[0][0].events.map((e) => e.text)).toEqual([
+      "hello",
+      "world",
+    ]);
+  });
+});
+
 describe("aiSegment tail retry", () => {
   const chunkEvents = Array.from({ length: 12 }, (_, i) => ({
     start: i * 1000,

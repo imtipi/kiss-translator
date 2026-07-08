@@ -84,11 +84,19 @@ export async function aiSegment({
   const nonSpeechEvents = [];
 
   for (const item of chunkEvents) {
-    if (!item.text) continue;
-    if (NON_SPEECH_RE.test(item.text.trim())) {
-      nonSpeechEvents.push(item);
+    // >> 说话人标记保留在事件文本里供统计断句使用，AI 断句用不上，
+    // 混进 o 文本还会原样出现在字幕上，在输入侧剥离。
+    const text = String(item.text || "")
+      .replace(/>>+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!text) continue;
+    // 括号标签事件经 cleanTimedText 清洗后一般已不存在，判别保留作为
+    // 自定义轨道或异常格式的兜底，命中的照旧独立成条。
+    if (NON_SPEECH_RE.test(text)) {
+      nonSpeechEvents.push({ ...item, text });
     } else {
-      speechEvents.push(item);
+      speechEvents.push(text === item.text ? item : { ...item, text });
     }
   }
 

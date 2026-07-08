@@ -27,6 +27,34 @@ describe("youtubeSubtitleProcessing", () => {
     expect(cleanTimedText(" <b>Hello</b>\u200B   world ")).toBe("Hello world");
   });
 
+  test("strips ASR noise tokens: bracket tags and notes, keeps speaker markers", () => {
+    expect(cleanTimedText("[Music]")).toBe("");
+    expect(cleanTimedText(" and [Music]")).toBe("and");
+    // >> 是统计断句的说话人边界信号，事件层保留，AI 输入侧再剥离。
+    expect(cleanTimedText(">> [Applause] hello")).toBe(">> hello");
+    expect(cleanTimedText("[\u97F3\u697D]")).toBe("");
+    expect(cleanTimedText("\u266A\u266A lyrics \u266A")).toBe("lyrics");
+  });
+
+  test("music-tag segs become time breaks without emitting words", () => {
+    const events = [
+      {
+        tStartMs: 1000,
+        dDurationMs: 3000,
+        segs: [
+          { utf8: "hello", tOffsetMs: 0 },
+          { utf8: " [Music]", tOffsetMs: 500 },
+          { utf8: "world", tOffsetMs: 2000 },
+        ],
+      },
+    ];
+
+    expect(genFlatEvents(normalizeTimedTextEvents(events))).toEqual([
+      { text: "hello", start: 1000, end: 1500 },
+      { text: "world", start: 3000, end: 4000 },
+    ]);
+  });
+
   test("keeps YouTube line-break control events during normalization", () => {
     const lineBreak = {
       aAppend: 1,
@@ -56,10 +84,7 @@ describe("youtubeSubtitleProcessing", () => {
       cue(2500, 3000),
       cue(5000, 5800),
     ];
-    const incoming = [
-      cue(1000, 2000, { _reanchored: true }),
-      cue(2000, 5000),
-    ];
+    const incoming = [cue(1000, 2000, { _reanchored: true }), cue(2000, 5000)];
 
     replaceReanchoredRange(list, incoming);
 

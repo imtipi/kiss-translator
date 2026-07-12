@@ -44,6 +44,31 @@ describe("aiResponseParser", () => {
     ).toEqual([{ id: 0, translation: ["单条译文", "en"] }]);
   });
 
+  test("recovers JSON followed by stray closing brackets", () => {
+    // 实测畸形响应：合法 JSON 结尾粘了多余的 ]}，朴素的「首 { 到末 } 」截取会失败。
+    expect(
+      parseJsonTranslationSegments(
+        '{"translations":[{"id":0,"text":"甲"},{"id":1,"text":"乙"}],"sourceLanguage":"ja"}]}'
+      )
+    ).toEqual([
+      { id: 0, translation: ["甲", ""] },
+      { id: 1, translation: ["乙", ""] },
+    ]);
+  });
+
+  test("balanced slice respects brackets inside string literals", () => {
+    expect(
+      parseJsonTranslationSegments('[{"id":0,"text":"a}]b\\"c"}] junk }]')
+    ).toEqual([{ id: 0, translation: ['a}]b"c', ""] }]);
+  });
+
+  test("returns empty for unrecoverable JSON instead of leaking text", () => {
+    // 截断输出：有闭括号但永远无法平衡，平衡扫描返回 null 而非泄漏原文。
+    expect(
+      parseJsonTranslationSegments('{"translations":[{"id":0,"text":"x"}')
+    ).toEqual([]);
+  });
+
   test("parses XML segments by id and keeps inner HTML", () => {
     expect(
       parseXmlTranslationSegments(

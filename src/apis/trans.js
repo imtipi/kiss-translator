@@ -255,7 +255,7 @@ const parseAIRes = (raw, useBatchFetch = true) => {
   }
 
   // 剥离 Markdown 常用的 ```json...``` 代码块包裹
-  let content = stripMarkdownCodeBlock(raw).trim();
+  const content = stripMarkdownCodeBlock(raw).trim();
 
   // JSON/XML/LINE 三种聚合格式统一交给共享字符串解析器处理。
   // 这里不再直接使用 DOMParser 解析 XML，避免浏览器 Trusted Types / DOMPurify
@@ -265,6 +265,13 @@ const parseAIRes = (raw, useBatchFetch = true) => {
   });
   if (structuredSegments.length > 0) {
     return structuredSegments.map((segment) => segment.translation);
+  }
+
+  // JSON 意图明确却解析失败的响应不能落入按行兜底：单行畸形 JSON 会整段
+  // 变成批次第一条「译文」上屏，返回空让批次按失败重试。只匹配对象或对象
+  // 数组的开头，"[Music]"、"[已删除]" 这类方括号开头的正常译文行不受影响。
+  if (/^(\{\s*"|\[\s*[[{])/.test(content)) {
+    return [];
   }
 
   // 兜底策略：纯文本按行切割解析

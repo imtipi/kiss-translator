@@ -81,31 +81,80 @@ export const parseJsonTranslationSegments = (
     return [];
   }
 
+  let parsed;
   try {
-    const parsed = JSON.parse(content.substring(start, end + 1));
-    // 兼容三类完整 JSON 输出：
-    // 1. 数组：[{ id, text }]
-    // 2. 包装对象：{ translations: [{ id, text }] }
-    // 3. 单对象：{ id, text }
-    const list = Array.isArray(parsed)
-      ? parsed
-      : parsed.translations || (parsed.result ? [parsed.result] : [parsed]);
-
-    if (!Array.isArray(list) || list.length === 0) {
+    parsed = JSON.parse(content.substring(start, end + 1));
+  } catch {
+    // 朴素截取治得了 JSON 前后混说明文字，治不了合法 JSON 后粘多余括号或
+    // 第二段输出（实测批量翻译整包失败的元凶）：按括号平衡重截首个完整值。
+    const balanced = sliceFirstBalancedJson(content, start);
+    if (!balanced) {
       return [];
     }
+    try {
+      parsed = JSON.parse(balanced);
+    } catch {
+      return [];
+    }
+  }
 
-    const segments = list
-      .map((item, index) =>
-        normalizeTranslationItem(item, index, { decodeText })
-      )
-      .filter(Boolean)
-      .map((segment, order) => ({ ...segment, order }));
+  // 兼容三类完整 JSON 输出：
+  // 1. 数组：[{ id, text }]
+  // 2. 包装对象：{ translations: [{ id, text }] }
+  // 3. 单对象：{ id, text }
+  const list = Array.isArray(parsed)
+    ? parsed
+    : parsed.translations || (parsed.result ? [parsed.result] : [parsed]);
 
-    return sortSegments(segments);
-  } catch {
+  if (!Array.isArray(list) || list.length === 0) {
     return [];
   }
+
+  const segments = list
+    .map((item, index) => normalizeTranslationItem(item, index, { decodeText }))
+    .filter(Boolean)
+    .map((segment, order) => ({ ...segment, order }));
+
+  return sortSegments(segments);
+};
+
+/**
+ * 在字符串字面量与转义感知下按括号平衡截取首个完整 JSON 值。
+ * 找不到平衡终点（截断输出）时返回 null。
+ */
+const sliceFirstBalancedJson = (content, start) => {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let i = start; i < content.length; i++) {
+    const ch = content[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "{" || ch === "[") {
+      depth += 1;
+    } else if (ch === "}" || ch === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        return content.substring(start, i + 1);
+      }
+      if (depth < 0) {
+        return null;
+      }
+    }
+  }
+
+  return null;
 };
 
 /**

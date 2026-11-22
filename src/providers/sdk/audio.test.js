@@ -92,6 +92,35 @@ test("transcription adapters preserve segment words and OpenAI top-level word ti
       },
     }).segments
   ).toEqual([segment]);
+  expect(
+    parseTranscription({
+      status: 200,
+      body: {
+        text: "Hello everyone. Today works.",
+        segments: [
+          { start: 0.08, end: 3.2, text: "Hello everyone. Today works." },
+        ],
+        words: [
+          { start: 0.08, end: 0.4, word: "Hello" },
+          { start: 0.4, end: 1.12, word: "everyone" },
+          { start: 1.92, end: 2.4, word: "Today" },
+          { start: 2.4, end: 3.2, word: "works" },
+        ],
+      },
+    }).segments
+  ).toEqual([
+    {
+      start: 0.08,
+      end: 3.2,
+      text: "Hello everyone. Today works.",
+      words: [
+        { start: 0.08, end: 0.4, text: "Hello" },
+        { start: 0.4, end: 1.12, text: "everyone." },
+        { start: 1.92, end: 2.4, text: "Today" },
+        { start: 2.4, end: 3.2, text: "works." },
+      ],
+    },
+  ]);
 });
 
 test("timestamp requests explicitly select verbose JSON; ordinary requests retain JSON", () => {

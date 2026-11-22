@@ -4,7 +4,11 @@ import { subscribeStorageInvalidation } from "../libs/storageEvents";
 jest.mock("../libs/storageEvents", () => ({
   subscribeStorageInvalidation: jest.fn(),
 }));
-import { apiSubtitle, apiSummarizeContext } from "../apis/index.js";
+import {
+  apiSubtitle,
+  apiSummarizeContext,
+  apiSummarizeContextAndVideo,
+} from "../apis/index.js";
 import { YouTubeCaptionProvider } from "./YouTubeCaptionProvider.js";
 import { eventsToSubtitles } from "./youtubeAiSegmentation.js";
 import { prepareTimedTextEvents } from "./youtubeSubtitleProcessing.js";
@@ -145,6 +149,7 @@ jest.mock("../config", () => ({
 jest.mock("../apis/index.js", () => ({
   apiSubtitle: jest.fn(),
   apiSummarizeContext: jest.fn(),
+  apiSummarizeContextAndVideo: jest.fn(),
 }));
 
 jest.mock("../apis/history.js", () => ({ clearMsgHistory: jest.fn() }));
@@ -1916,5 +1921,95 @@ describe("YouTubeCaptionProvider acquisition lifecycle", () => {
     expect(sentTranscript).toContain(middleMarker);
     expect(sentTranscript).toContain(tailMarker);
     expect(sentTranscript).toContain("\n...\n");
+  });
+
+  test("combines AI context with video summary in one streaming request and unblocks eventsToSubtitles on onContextReady before combinedPromise settles", async () => {
+    document.title = "Fallback Document Title";
+    const longTranscript = Array.from(
+      { length: 1200 },
+      (_, i) => `segment${i}`
+    ).join(" ");
+    expect(longTranscript.length).toBeGreaterThan(8000);
+    prepareTimedTextEvents.mockReturnValue({
+      events: [{ text: longTranscript }],
+      flatEvents: [{ start: 0, end: 600000, text: longTranscript }],
+    });
+
+    let triggerContextReady;
+    let resolveCombined;
+    apiSummarizeContextAndVideo.mockImplementationOnce(({ onContextReady }) => {
+      triggerContextReady = onContextReady;
+      return new Promise((resolve) => {
+        resolveCombined = resolve;
+      });
+    });
+
+    create({
+      aiContextSlug: "ai",
+      summaryApiSlug: "ai",
+      combineContextAndVideoSummary: true,
+      toLang: "zh-CN",
+      transApis: [{ apiSlug: "ai", apiType: "openai", apiName: "AI" }],
+    });
+    await flushPromises();
+    await flushPromises();
+
+    expect(apiSummarizeContext).not.toHaveBeenCalled();
+    expect(apiSummarizeContextAndVideo).toHaveBeenCalledTimes(1);
+    expect(apiSummarizeContextAndVideo).toHaveBeenCalledWith(
+      expect.objectContaining({
+        videoId: "video-1",
+        title: "Fallback Document Title",
+        description: "",
+        transcript: longTranscript,
+        summaryTranscript: longTranscript,
+        to: "zh-CN",
+      })
+    );
+    expect(eventsToSubtitles).not.toHaveBeenCalled();
+
+    // 流式提前闭合 </context> 后，即使整个 combinedPromise 尚未 resolve，字幕翻译也应立即放行。
+    triggerContextReady("Streamed context briefing");
+    await flushPromises();
+    await flushPromises();
+
+    expect(eventsToSubtitles).toHaveBeenCalledTimes(1);
+    expect(eventsToSubtitles.mock.calls[0][0].docInfo.summary).toBe(
+      "Streamed context briefing"
+    );
+
+    resolveCombined({
+      context: "Streamed context briefing",
+      summary: "Combined markdown video summary",
+    });
+    await flushPromises();
+  });
+
+  test("does not combine context and video summary when aiContextSlug differs from summaryApiSlug", async () => {
+    const longTranscript = Array.from(
+      { length: 100 },
+      (_, i) => `segment${i}`
+    ).join(" ");
+    prepareTimedTextEvents.mockReturnValue({
+      events: [{ text: longTranscript }],
+      flatEvents: [{ start: 0, end: 60000, text: longTranscript }],
+    });
+    apiSummarizeContext.mockResolvedValueOnce("Context from model A");
+
+    create({
+      aiContextSlug: "ai-a",
+      summaryApiSlug: "ai-b",
+      combineContextAndVideoSummary: true,
+      toLang: "zh-CN",
+      transApis: [
+        { apiSlug: "ai-a", apiType: "openai", apiName: "AI A" },
+        { apiSlug: "ai-b", apiType: "openai", apiName: "AI B" },
+      ],
+    });
+    await flushPromises();
+    await flushPromises();
+
+    expect(apiSummarizeContextAndVideo).not.toHaveBeenCalled();
+    expect(apiSummarizeContext).toHaveBeenCalledTimes(1);
   });
 });

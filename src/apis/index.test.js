@@ -85,6 +85,7 @@ import {
   apiSummarizeVideo,
   getVideoSummarySignature,
   apiSummarizeContext,
+  apiSummarizeContextAndVideo,
 } from "./index";
 import {
   handleDict,
@@ -1418,6 +1419,163 @@ describe("apiSummarizeVideo and getVideoSummarySignature cache identity", () => 
       systemPrompt: DEFAULT_SUMMARY_PROMPT.systemPrompt,
       userPrompt: DEFAULT_SUMMARY_PROMPT.userPrompt,
     });
+  });
+  test("combined context and video summary parses XML blocks, caches both, and gracefully falls back when tags are missing", async () => {
+    getHttpCachePolyfill.mockResolvedValue(undefined);
+    handleSummarize.mockResolvedValueOnce(
+      "<context>\nConcise briefing for translator.\n</context>\n<summary>\n## 概述\n- **要点**：详细总结\n</summary>"
+    );
+
+    const combined = await apiSummarizeContextAndVideo({
+      videoId: "vid-combined",
+      title: "Sample Title",
+      description: "Sample Description",
+      transcript: "Full video transcript text",
+      apiSetting: { apiType: "OpenAI", apiSlug: "summary" },
+      summaryPrompt: DEFAULT_SUMMARY_PROMPT,
+      to: "zh-CN",
+    });
+
+    expect(combined).toEqual({
+      context: "Concise briefing for translator.",
+      summary: "## 概述\n- **要点**：详细总结",
+    });
+    const combinedPrompt = handleSummarize.mock.calls.at(-1)[0].prompt;
+    expect(combinedPrompt.systemPrompt).toContain("<context>");
+    expect(combinedPrompt.systemPrompt).toContain("<summary>");
+    expect(combinedPrompt.systemPrompt).toContain(
+      defaultContextSummaryPrompt.systemPrompt
+    );
+    expect(combinedPrompt.systemPrompt).toContain(
+      DEFAULT_SUMMARY_PROMPT.systemPrompt
+    );
+
+    // 流式输出在闭合 </context> 时立即触发 onContextReady，无需等待 </summary> 完成。
+    const onContextReady = jest.fn();
+    handleSummarize.mockImplementationOnce(async ({ onStreamChunk }) => {
+      onStreamChunk?.(
+        "<context>\nStreamed briefing.\n</context>\n<summary>\n## 概述"
+      );
+      expect(onContextReady).toHaveBeenCalledTimes(1);
+      expect(onContextReady).toHaveBeenCalledWith("Streamed briefing.");
+      return "<context>\nStreamed briefing.\n</context>\n<summary>\n## 概述\n- 要点\n</summary>";
+    });
+    const streamed = await apiSummarizeContextAndVideo({
+      videoId: "vid-streamed",
+      title: "Sample Title",
+      description: "Sample Description",
+      transcript: "Full video transcript text",
+      apiSetting: { apiType: "OpenAI", apiSlug: "summary" },
+      summaryPrompt: DEFAULT_SUMMARY_PROMPT,
+      to: "zh-CN",
+      onContextReady,
+    });
+    expect(streamed).toEqual({
+      context: "Streamed briefing.",
+      summary: "## 概述\n- 要点",
+    });
+
+    // Malformed output without XML tags still preserves context and leaves video summary empty.
+    handleSummarize.mockResolvedValueOnce("Plain briefing without tags");
+    const fallback = await apiSummarizeContextAndVideo({
+      videoId: "vid-malformed",
+      title: "Sample Title",
+      description: "Sample Description",
+      transcript: "Full video transcript text",
+      apiSetting: { apiType: "OpenAI", apiSlug: "summary" },
+      summaryPrompt: DEFAULT_SUMMARY_PROMPT,
+      to: "zh-CN",
+    });
+    expect(fallback).toEqual({
+      context: "Plain briefing without tags",
+      summary: "",
+    });
+  });
+
+  test("combined summary strips <think> blocks, emits cached context immediately when summary cache misses, and skips fallback after </context> closes", async () => {
+    // 1. <think> 内的伪 <context> 不应提前触发 onContextReady，闭合 </think> 后才提取真实 <context>。
+    getHttpCachePolyfill.mockResolvedValue(undefined);
+    const onThinkContextReady = jest.fn();
+    handleSummarize.mockImplementationOnce(async ({ onStreamChunk }) => {
+      onStreamChunk?.("<think>draft <context>wrong</context>");
+      expect(onThinkContextReady).not.toHaveBeenCalled();
+      onStreamChunk?.(
+        "<think>draft <context>wrong</context></think>\n<context>Real context</context>\n<summary>Real"
+      );
+      expect(onThinkContextReady).toHaveBeenCalledTimes(1);
+      expect(onThinkContextReady).toHaveBeenCalledWith("Real context");
+      return "<think>draft <context>wrong</context></think>\n<context>Real context</context>\n<summary>Real summary</summary>";
+    });
+    const thinkRes = await apiSummarizeContextAndVideo({
+      videoId: "vid-think",
+      title: "Title",
+      description: "Desc",
+      transcript: "Transcript",
+      apiSetting: { apiType: "OpenAI", apiSlug: "summary" },
+      summaryPrompt: DEFAULT_SUMMARY_PROMPT,
+      to: "zh-CN",
+      onContextReady: onThinkContextReady,
+    });
+    expect(thinkRes).toEqual({
+      context: "Real context",
+      summary: "Real summary",
+    });
+
+    // 2. cachedContext 命中但 cachedVideoSummary 未命中时，应立即触发 onContextReady 放行翻译。
+    getHttpCachePolyfill
+      .mockResolvedValueOnce("Cached context")
+      .mockResolvedValueOnce(undefined);
+    const onCachedContextReady = jest.fn();
+    handleSummarize.mockImplementationOnce(async () => {
+      expect(onCachedContextReady).toHaveBeenCalledTimes(1);
+      expect(onCachedContextReady).toHaveBeenCalledWith("Cached context");
+      return "<context>New context</context><summary>Fresh summary</summary>";
+    });
+    const partialCacheRes = await apiSummarizeContextAndVideo({
+      videoId: "vid-partial-cache",
+      title: "Title",
+      description: "Desc",
+      transcript: "Transcript",
+      apiSetting: { apiType: "OpenAI", apiSlug: "summary" },
+      summaryPrompt: DEFAULT_SUMMARY_PROMPT,
+      to: "zh-CN",
+      onContextReady: onCachedContextReady,
+    });
+    expect(partialCacheRes.summary).toBe("Fresh summary");
+
+    // 3. </context> 已闭合后在 <summary> 阶段断流：允许回退判定返回 false，不写残缺总结缓存，返回完整 context。
+    getHttpCachePolyfill.mockResolvedValue(undefined);
+    putHttpCachePolyfill.mockClear();
+    const onPartialFailContextReady = jest.fn();
+    handleSummarize.mockImplementationOnce(
+      async ({ onStreamChunk, shouldFallbackOnStreamError }) => {
+        expect(shouldFallbackOnStreamError()).toBe(true);
+        onStreamChunk?.(
+          "<context>Completed context</context>\n<summary>Halfway..."
+        );
+        expect(onPartialFailContextReady).toHaveBeenCalledWith(
+          "Completed context"
+        );
+        expect(shouldFallbackOnStreamError()).toBe(false);
+        throw new Error("stream disconnected mid-summary");
+      }
+    );
+    const partialFailRes = await apiSummarizeContextAndVideo({
+      videoId: "vid-mid-summary-drop",
+      title: "Title",
+      description: "Desc",
+      transcript: "Transcript",
+      apiSetting: { apiType: "OpenAI", apiSlug: "summary" },
+      summaryPrompt: DEFAULT_SUMMARY_PROMPT,
+      to: "zh-CN",
+      onContextReady: onPartialFailContextReady,
+    });
+    expect(partialFailRes).toEqual({
+      context: "Completed context",
+      summary: "",
+    });
+    expect(putHttpCachePolyfill).toHaveBeenCalledTimes(1);
+    expect(putHttpCachePolyfill.mock.calls[0][2]).toBe("Completed context");
   });
   test("getVideoSummarySignature differentiates transcript, title, prompt, and language changes", async () => {
     const baseParams = {

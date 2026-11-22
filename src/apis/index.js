@@ -42,6 +42,9 @@ import {
   INPUT_PLACE_TONE,
   INPUT_PLACE_GLOSSARY,
   defaultContextSummaryPrompt,
+  buildCombinedContextSummaryPrompt,
+  extractClosedContextBlock,
+  parseCombinedContextSummaryResponse,
   resolveEmptyApiPrompts,
   resolveSummaryPrompt,
 } from "../config";
@@ -1254,6 +1257,144 @@ export const apiSummarizeContext = async ({
   }
 
   return "";
+};
+
+/**
+ * 单次请求同时生成翻译上下文简报（context）与侧栏视频总结（summary），
+ * 并将两份结果分别写入各自缓存，避免重复发送长字幕和双份思考开销。
+ */
+export const apiSummarizeContextAndVideo = async ({
+  videoId,
+  title,
+  description,
+  transcript,
+  summaryTranscript = transcript,
+  apiSetting,
+  videoSummaryApiSetting,
+  summaryPrompt,
+  to = "zh-CN",
+  signal,
+  onContextReady,
+}) => {
+  if (!supportsApiCapability(apiSetting, "summarize"))
+    throw Object.assign(
+      new Error("Summary capability is disabled or unsupported."),
+      { code: "CAPABILITY_DISABLED" }
+    );
+
+  const summaryTargetApi = videoSummaryApiSetting || apiSetting;
+  const resolvedSummaryPrompt = resolveSummaryPrompt(
+    summaryTargetApi,
+    summaryPrompt
+  );
+
+  const contextCacheOpts = {
+    apiSlug: apiSetting.apiSlug,
+    videoId,
+    promptVersion: PROMPT_CACHE_SALT,
+    ...((apiSetting.provider || apiSetting.enabledCapabilities) && {
+      providerSig: await providerCacheSignature(apiSetting, "summarize", {
+        title,
+        description,
+        transcript,
+      }),
+    }),
+  };
+  const contextCacheInput = `${URL_CACHE_CONTEXT}?${queryString.stringify(contextCacheOpts)}`;
+
+  const summarySig = await getVideoSummarySignature({
+    videoId,
+    title,
+    description,
+    transcript: summaryTranscript,
+    apiSetting: summaryTargetApi,
+    prompt: resolvedSummaryPrompt,
+    to,
+  });
+  const videoCacheOpts = {
+    apiSlug: summaryTargetApi.apiSlug,
+    videoId,
+    to,
+    sig: summarySig,
+    type: "video_summary",
+  };
+  const videoCacheInput = `${URL_CACHE_CONTEXT}?${queryString.stringify(videoCacheOpts)}`;
+
+  const [cachedContext, cachedVideoSummary] = await Promise.all([
+    getHttpCachePolyfill(contextCacheInput),
+    getHttpCachePolyfill(videoCacheInput),
+  ]);
+  if (cachedContext && cachedVideoSummary) {
+    onContextReady?.(cachedContext);
+    return { context: cachedContext, summary: cachedVideoSummary };
+  }
+
+  let contextDispatched = false;
+  let dispatchedContext = "";
+  const emitContextReady = (ctx) => {
+    if (contextDispatched || !ctx) return;
+    contextDispatched = true;
+    dispatchedContext = ctx;
+    putHttpCachePolyfill(contextCacheInput, null, ctx);
+    onContextReady?.(ctx);
+  };
+
+  if (cachedContext) {
+    contextDispatched = true;
+    dispatchedContext = cachedContext;
+    onContextReady?.(cachedContext);
+  }
+
+  const combinedPrompt = buildCombinedContextSummaryPrompt(
+    resolvedSummaryPrompt
+  );
+  let raw = "";
+  try {
+    raw = await handleSummarize({
+      title,
+      description,
+      transcript,
+      apiSetting,
+      prompt: combinedPrompt,
+      to,
+      signal,
+      shouldFallbackOnStreamError: () => !contextDispatched,
+      onStreamChunk: (partialText) => {
+        if (contextDispatched) return;
+        const streamedContext = extractClosedContextBlock(partialText);
+        if (streamedContext) {
+          emitContextReady(streamedContext);
+        }
+      },
+    });
+  } catch (err) {
+    if (contextDispatched && !signal?.aborted && err?.name !== "AbortError") {
+      logger
+        .child("index")
+        .warn(
+          "combined summary stream interrupted after context completed",
+          err
+        );
+      return {
+        context: dispatchedContext,
+        summary: cachedVideoSummary || "",
+      };
+    }
+    throw err;
+  }
+
+  const { context, summary } = parseCombinedContextSummaryResponse(raw);
+  if (context) {
+    emitContextReady(context);
+  }
+  if (summary) {
+    putHttpCachePolyfill(videoCacheInput, null, summary);
+  }
+
+  return {
+    context: context || cachedContext || "",
+    summary: summary || cachedVideoSummary || "",
+  };
 };
 
 /**

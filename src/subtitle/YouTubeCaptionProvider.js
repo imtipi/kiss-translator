@@ -5,10 +5,15 @@ import {
   loadTerminologySnapshot,
   TERMINOLOGY_INDEX,
 } from "../libs/terminologyStorage";
-import { apiSubtitle, apiSummarizeContext } from "../apis/index.js";
+import {
+  apiSubtitle,
+  apiSummarizeContext,
+  apiSummarizeContextAndVideo,
+} from "../apis/index.js";
 import { BilingualSubtitleManager } from "./BilingualSubtitleManager.js";
 import { YouTubeSubtitleList } from "./YouTubeSubtitleList.js";
-import { API_SPE_TYPES } from "../config";
+import { API_SPE_TYPES, OPT_TRANS_BUILTINAI } from "../config";
+import { DEFAULT_SUMMARY_PROMPT } from "../config/prompt.js";
 import { supportsApiCapability } from "../config/serviceSelection";
 import { downloadBlobFile } from "../libs/utils.js";
 import { newI18n } from "../config";
@@ -1981,9 +1986,27 @@ export class YouTubeCaptionProvider {
     });
   }
 
+  #shouldCombineContextAndVideoSummary(contextApiSetting) {
+    const {
+      combineContextAndVideoSummary = false,
+      aiContextSlug,
+      summaryApiSlug,
+    } = this.#setting;
+    return Boolean(
+      combineContextAndVideoSummary &&
+        aiContextSlug &&
+        aiContextSlug !== "-" &&
+        summaryApiSlug &&
+        summaryApiSlug !== "-" &&
+        aiContextSlug === summaryApiSlug &&
+        contextApiSetting?.apiType !== OPT_TRANS_BUILTINAI
+    );
+  }
+
   /**
    * 异步调用 AI 总结 API，提取视频的专有名词、主要大意及语境背景。
    * 提取的信息会保存在 docInfo.summary 中，为之后的翻译步骤提供上下文提示。
+   * 开启合并单次请求时，会在同一次流式调用中同时生成并缓存侧栏视频总结。
    *
    * @private
    * @param {Array<object>} flatEvents 展平后的原始字幕单词节点流。
@@ -1991,7 +2014,15 @@ export class YouTubeCaptionProvider {
    * @returns {Promise<void>}
    */
   async #enrichDocInfoWithAI(flatEvents, processingVersion) {
-    const { aiContextSlug, transApis } = this.#setting;
+    const {
+      aiContextSlug,
+      summaryApiSlug,
+      summaryPromptSlug = "default_video_summary",
+      transApis = [],
+      prompts = [],
+      toLang,
+      to,
+    } = this.#setting;
 
     if (!aiContextSlug || aiContextSlug === "-") return;
     if (this.#isStaleProcessing(processingVersion)) return;
@@ -2006,6 +2037,8 @@ export class YouTubeCaptionProvider {
     )
       return;
 
+    const combineSummary =
+      this.#shouldCombineContextAndVideoSummary(contextApiSetting);
     const fullTranscript = flatEvents
       .map((e) => e.text)
       .filter(Boolean)
@@ -2017,17 +2050,72 @@ export class YouTubeCaptionProvider {
 
     const videoId = this.#videoId;
     const docInfo = this.#docInfo;
+    const title = docInfo.title || document.title;
+    const description = this.#fullDescription || docInfo.description || "";
 
     try {
       this.#playerUi.showNotification(this.#i18n("ai_context_analyzing"));
 
-      const summary = await apiSummarizeContext({
-        videoId,
-        title: docInfo.title,
-        description: this.#fullDescription || docInfo.description,
-        transcript,
-        apiSetting: contextApiSetting,
-      });
+      let summary = "";
+      if (combineSummary) {
+        const videoSummaryApiSetting =
+          transApis.find((api) => api.apiSlug === summaryApiSlug) ||
+          contextApiSetting;
+        const summaryPrompt =
+          prompts.find((p) => p.slug === summaryPromptSlug) ||
+          DEFAULT_SUMMARY_PROMPT;
+        let resolveContextReady;
+        const contextReadyPromise = new Promise((resolve) => {
+          resolveContextReady = resolve;
+        });
+        const applyContext = (ctx) => {
+          if (
+            ctx &&
+            videoId === this.#videoId &&
+            !this.#isStaleProcessing(processingVersion)
+          ) {
+            docInfo.summary = ctx;
+            this.#captionContextEnriched = true;
+          }
+          resolveContextReady(ctx || "");
+        };
+        const combinedPromise = apiSummarizeContextAndVideo({
+          videoId,
+          title,
+          description,
+          transcript,
+          summaryTranscript: fullTranscript,
+          apiSetting: contextApiSetting,
+          videoSummaryApiSetting,
+          summaryPrompt,
+          to: toLang || to || "zh-CN",
+          signal: this.#subtitleAbortController?.signal,
+          onContextReady: (ctx) => {
+            // 流式收到完整 </context> 后立即放行翻译，不再等待后面的 <summary> 生成完毕。
+            applyContext(ctx);
+          },
+        });
+        void combinedPromise
+          .then((combined) => {
+            applyContext(combined?.context || "");
+          })
+          .catch((err) => {
+            resolveContextReady("");
+            if (err?.name === "AbortError") return;
+            logger
+              .child("subtitle")
+              .warn("Youtube Provider: AI context enrichment failed", err);
+          });
+        summary = await contextReadyPromise;
+      } else {
+        summary = await apiSummarizeContext({
+          videoId,
+          title,
+          description,
+          transcript,
+          apiSetting: contextApiSetting,
+        });
+      }
 
       if (
         summary &&
@@ -2038,6 +2126,7 @@ export class YouTubeCaptionProvider {
         this.#captionContextEnriched = true;
       }
     } catch (err) {
+      if (err?.name === "AbortError") return;
       logger
         .child("subtitle")
         .warn("Youtube Provider: AI context enrichment failed", err);

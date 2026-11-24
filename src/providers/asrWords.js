@@ -1,4 +1,33 @@
 const ONLY_WHITESPACE_OR_PUNCT = /^[\s\p{P}\p{S}]*$/u;
+const STRIP_PUNCT_AND_SPACE = /[\s\p{P}\p{S}]+/gu;
+const BOUNDARY_TOLERANCE_SECONDS = 0.1;
+const OVERLAP_TOLERANCE_SECONDS = 0.1;
+
+function matchTokenIgnoringPunct(segmentText, cursor, rawToken) {
+  const normToken = rawToken.replace(STRIP_PUNCT_AND_SPACE, "").toLowerCase();
+  if (!normToken) return null;
+  let start = cursor;
+  while (
+    start < segmentText.length &&
+    ONLY_WHITESPACE_OR_PUNCT.test(segmentText[start])
+  ) {
+    start++;
+  }
+  let pos = start;
+  let matched = 0;
+  while (pos < segmentText.length && matched < normToken.length) {
+    const ch = segmentText[pos];
+    if (ONLY_WHITESPACE_OR_PUNCT.test(ch)) {
+      pos++;
+      continue;
+    }
+    if (ch.toLowerCase() !== normToken[matched]) return null;
+    matched++;
+    pos++;
+  }
+  if (matched !== normToken.length) return null;
+  return { start, end: pos };
+}
 
 /**
  * Reattach punctuation from `segmentText` onto ordered ASR word tokens
@@ -14,12 +43,19 @@ function alignWordsWithPunctuation(words, segmentText) {
     if (!rawToken) return undefined;
 
     let matchPos = segmentText.indexOf(rawToken, cursor);
+    let matchEnd = matchPos >= 0 ? matchPos + rawToken.length : -1;
     if (matchPos < 0) {
       matchPos = segmentText
         .toLowerCase()
         .indexOf(rawToken.toLowerCase(), cursor);
+      matchEnd = matchPos >= 0 ? matchPos + rawToken.length : -1;
     }
-    if (matchPos < 0) return undefined;
+    if (matchPos < 0) {
+      const fuzzy = matchTokenIgnoringPunct(segmentText, cursor, rawToken);
+      if (!fuzzy) return undefined;
+      matchPos = fuzzy.start;
+      matchEnd = fuzzy.end;
+    }
 
     const gap = segmentText.slice(cursor, matchPos);
     if (!ONLY_WHITESPACE_OR_PUNCT.test(gap)) return undefined;
@@ -41,13 +77,13 @@ function alignWordsWithPunctuation(words, segmentText) {
       }
     }
 
-    const matchedText = segmentText.slice(matchPos, matchPos + rawToken.length);
+    const matchedText = segmentText.slice(matchPos, matchEnd);
     result.push({
       start: words[i].start,
       end: words[i].end,
       text: leadingPunct + matchedText,
     });
-    cursor = matchPos + rawToken.length;
+    cursor = matchEnd;
   }
 
   const tail = segmentText.slice(cursor);
@@ -79,27 +115,54 @@ export function alignedAsrWords(segment) {
   )
     return undefined;
   let previous = segment.start;
+  const normalized = [];
   for (const word of words) {
     if (
       !word ||
       typeof word.text !== "string" ||
       !Number.isFinite(word.start) ||
       !Number.isFinite(word.end) ||
-      word.start < previous ||
       word.end < word.start ||
-      word.start < segment.start ||
-      word.end > segment.end
+      word.start < segment.start - BOUNDARY_TOLERANCE_SECONDS ||
+      word.end > segment.end + BOUNDARY_TOLERANCE_SECONDS ||
+      word.start < previous - OVERLAP_TOLERANCE_SECONDS
     )
       return undefined;
-    previous = word.start;
+    const start = Math.max(
+      previous,
+      Math.min(segment.end, Math.max(segment.start, word.start))
+    );
+    const end = Math.max(start, Math.min(segment.end, word.end));
+    normalized.push({ start, end, text: word.text });
+    previous = start;
   }
   if (
-    words
+    normalized
       .map((word) => word.text)
       .join("")
       .replace(/\s/g, "") === segment.text.replace(/\s/g, "")
   ) {
-    return words.map(({ start, end, text }) => ({ start, end, text }));
+    return normalized;
   }
-  return alignWordsWithPunctuation(words, segment.text);
+  const aligned = alignWordsWithPunctuation(normalized, segment.text);
+  if (aligned) return aligned;
+  // For multi-word ASR segments (e.g. number/contraction normalization differences
+  // between segment.text and words[]), preserve real word timestamps rather than
+  // collapsing an entire multi-minute segment into one unbreakable cue.
+  if (normalized.length >= 6) {
+    const wordsCompact = normalized
+      .map((word) => word.text)
+      .join("")
+      .replace(STRIP_PUNCT_AND_SPACE, "");
+    const segCompact = segment.text.replace(STRIP_PUNCT_AND_SPACE, "");
+    if (
+      wordsCompact.length > 0 &&
+      segCompact.length > 0 &&
+      wordsCompact.length >= segCompact.length * 0.7 &&
+      wordsCompact.length <= segCompact.length * 1.35
+    ) {
+      return normalized;
+    }
+  }
+  return undefined;
 }

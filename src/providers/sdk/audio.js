@@ -103,13 +103,28 @@ export function parseTranscription(response) {
     if (!result.segments?.length && alignedWords)
       result.segments = [{ ...segment, words: alignedWords }];
     else if (result.segments)
-      result.segments = result.segments.map((item) => {
+      result.segments = result.segments.map((item, index) => {
         if (item.words) return item;
+        const nextStart = result.segments[index + 1]?.start ?? Infinity;
+        const prevEnd = result.segments[index - 1]?.end ?? -Infinity;
+        const itemWords = words.filter((word) => {
+          const mid = (word.start + word.end) / 2;
+          const afterPrev =
+            index === 0 ? true : mid >= (prevEnd + item.start) / 2;
+          const beforeNext =
+            index === result.segments.length - 1
+              ? true
+              : mid < (item.end + nextStart) / 2;
+          return (
+            afterPrev &&
+            beforeNext &&
+            word.start >= item.start - 0.1 &&
+            word.end <= item.end + 0.1
+          );
+        });
         const aligned = alignedAsrWords({
           ...item,
-          words: words.filter(
-            (word) => word.start >= item.start && word.end <= item.end
-          ),
+          words: itemWords,
         });
         return { ...item, ...(aligned && { words: aligned }) };
       });

@@ -121,6 +121,43 @@ test("transcription adapters preserve segment words and OpenAI top-level word ti
       ],
     },
   ]);
+  expect(
+    parseTranscription({
+      status: 200,
+      body: {
+        text: "First part. Second part.",
+        segments: [
+          { start: 0.1, end: 2.0, text: "First part." },
+          { start: 2.0, end: 4.0, text: "Second part." },
+        ],
+        words: [
+          { start: 0.08, end: 1.0, word: "First" },
+          { start: 1.0, end: 2.02, word: "part" },
+          { start: 2.02, end: 3.0, word: "Second" },
+          { start: 3.0, end: 4.03, word: "part" },
+        ],
+      },
+    }).segments
+  ).toEqual([
+    {
+      start: 0.1,
+      end: 2.0,
+      text: "First part.",
+      words: [
+        { start: 0.1, end: 1.0, text: "First" },
+        { start: 1.0, end: 2.0, text: "part." },
+      ],
+    },
+    {
+      start: 2.0,
+      end: 4.0,
+      text: "Second part.",
+      words: [
+        { start: 2.02, end: 3.0, text: "Second" },
+        { start: 3.0, end: 4.0, text: "part." },
+      ],
+    },
+  ]);
 });
 
 test("timestamp requests explicitly select verbose JSON; ordinary requests retain JSON", () => {

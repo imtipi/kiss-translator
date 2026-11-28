@@ -1984,4 +1984,39 @@ describe("YouTubeCaptionProvider acquisition lifecycle", () => {
     expect(ctx.basePrompt).toContain("NebulaCore glossary and topic summary");
     expect(apiSummarizeContext).toHaveBeenCalledTimes(1);
   });
+
+  test("passes AbortSignal to apiSummarizeContext and aborts it on destroy", async () => {
+    const longTranscript = Array.from(
+      { length: 40 },
+      (_, i) => `Synthetic line ${i} discussing NebulaCore architecture.`
+    ).join(" ");
+    prepareTimedTextEvents.mockReturnValue({
+      events: [{ text: longTranscript }],
+      flatEvents: [{ start: 0, end: 5000, text: longTranscript }],
+    });
+
+    let capturedSignal;
+    apiSummarizeContext.mockImplementationOnce(
+      ({ signal }) =>
+        new Promise(() => {
+          capturedSignal = signal;
+        })
+    );
+
+    const provider = create({
+      aiContextSlug: "ai-ctx",
+      transApis: [
+        { apiSlug: "ai-ctx", apiType: "openai", model: "gpt-4o-mini" },
+      ],
+    });
+    await flushPromises();
+    await flushPromises();
+
+    expect(apiSummarizeContext).toHaveBeenCalledTimes(1);
+    expect(capturedSignal).toBeDefined();
+    expect(capturedSignal.aborted).toBe(false);
+
+    provider.destroy();
+    expect(capturedSignal.aborted).toBe(true);
+  });
 });

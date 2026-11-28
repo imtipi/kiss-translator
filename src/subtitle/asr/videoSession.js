@@ -21,6 +21,9 @@ import {
 import { isSameLang } from "../youtubeCaptionTracks";
 
 const fail = (code) => Object.assign(new Error(code), { code });
+const MAX_REMOTE_CHUNK_SPLIT_DEPTH = 3;
+const REMOTE_SPLIT_SIZE_OR_TIMEOUT_RE =
+  /\b(408|413|504|524)\b|payload\s+too\s+large|request\s+entity\s+too\s+large|file\s+too\s+large|audio\s+too\s+long|exceed(?:s|ed)?\s+(?:the\s+)?(?:max(?:imum)?\s+)?(?:size|length|duration|limit)|too\s+large|too\s+long|duration\s+limit|size\s+limit|timed?\s*out|timeout/i;
 const slots = new Map();
 const rank = { failed: 0, recognized: 1, segmented: 2, translated: 3 };
 const ranges = (chunks, total) =>
@@ -194,8 +197,12 @@ export class AsrVideoSession {
   }
   shouldSplitRemoteChunkOnError(cause, chunk) {
     if (isLocalAsrService(this.asrService)) return false;
+    if (cause?.name === "AbortError") return false;
     const minSplitSamples = 10 * ASR_SAMPLE_RATE;
     if (chunk.endSample - chunk.startSample <= minSplitSamples) return false;
+    const existing = this.chunkIndex.get(chunk.startSample);
+    const splitDepth = existing?.splitDepth ?? chunk.splitDepth ?? 0;
+    if (splitDepth >= MAX_REMOTE_CHUNK_SPLIT_DEPTH) return false;
     const code = cause?.code || "";
     if (
       [
@@ -214,17 +221,22 @@ export class AsrVideoSession {
     )
       return false;
     const msg = String(cause?.message || "");
-    if (/\b(401|402|403|429)\b/.test(msg)) return false;
-    return [
-      "AUDIO_EXPORT_TOO_LARGE",
-      "RESOURCE_BUDGET_EXCEEDED",
-      "INPUT_LIMIT_EXCEEDED",
-      "TIMEOUT",
-      "HTTP_ERROR",
-      "PROVIDER_ERROR",
-      "ASR_FAILED",
-      "INVALID_RESPONSE",
-    ].includes(code);
+    if (/\b(401|402|403|404|429)\b/.test(msg)) return false;
+    if (
+      [
+        "AUDIO_EXPORT_TOO_LARGE",
+        "RESOURCE_BUDGET_EXCEEDED",
+        "INPUT_LIMIT_EXCEEDED",
+        "TIMEOUT",
+      ].includes(code)
+    ) {
+      return true;
+    }
+    // 仅在 HTTP/服务错误明确指向体积超限、时长超限或超时时才拆块，避免 500/鉴权/网络异常放大请求次数。
+    if (["HTTP_ERROR", "PROVIDER_ERROR", "ASR_FAILED"].includes(code)) {
+      return REMOTE_SPLIT_SIZE_OR_TIMEOUT_RE.test(msg);
+    }
+    return false;
   }
   splitChunkInIndex(chunk) {
     const frameSamples = 320;
@@ -233,6 +245,7 @@ export class AsrVideoSession {
     if (half < ASR_SAMPLE_RATE || span - half < ASR_SAMPLE_RATE) return false;
     const mid = chunk.startSample + half;
     const existing = this.chunkIndex.get(chunk.startSample);
+    const nextSplitDepth = (existing?.splitDepth ?? chunk.splitDepth ?? 0) + 1;
     const endOfMedia = Boolean(existing?.endOfMedia);
     const silent = Boolean(chunk.silent ?? existing?.silent);
     this.chunkIndex.delete(chunk.startSample);
@@ -240,11 +253,13 @@ export class AsrVideoSession {
       startSample: chunk.startSample,
       endSample: mid,
       silent,
+      splitDepth: nextSplitDepth,
     });
     this.chunkIndex.set(mid, {
       startSample: mid,
       endSample: chunk.endSample,
       silent,
+      splitDepth: nextSplitDepth,
       ...(endOfMedia && { endOfMedia: true }),
     });
     this.blocks.delete(chunk.startSample);

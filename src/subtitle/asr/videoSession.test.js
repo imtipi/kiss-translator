@@ -1864,3 +1864,59 @@ test("recognized ASR blocks stay hidden until streamed or translated cues arrive
   expect(test.session.subtitles()).toHaveLength(2);
   expect(test.session.streamingSubtitles.size).toBe(0);
 });
+
+test("remote ASR does not split on generic server 500 or invalid response errors", async () => {
+  const test = setup({
+    durationMs: 24000,
+    asrService: {
+      apiSlug: "remote",
+      apiType: "Plugin",
+      asrTimestampSupport: "supported",
+      asrMaxDurationSeconds: 60,
+    },
+  });
+  const seenSpans = [];
+  test.recognize.mockImplementation(async (_service, chunk) => {
+    seenSpans.push((chunk.endSample - chunk.startSample) / 16000);
+    throw Object.assign(new Error("HTTP 500 Internal Server Error"), {
+      code: "HTTP_ERROR",
+    });
+  });
+  await test.session.start();
+  await until(() => test.session.state.stoppedByError);
+  expect(seenSpans).toHaveLength(1);
+  expect(seenSpans[0]).toBe(24);
+});
+
+test("remote ASR caps recursive chunk splitting at max split depth", async () => {
+  const test = setup({
+    durationMs: 200000,
+    asrService: {
+      apiSlug: "remote",
+      apiType: "Plugin",
+      asrTimestampSupport: "supported",
+      asrMaxDurationSeconds: 200,
+    },
+  });
+  const session = test.session;
+  const baseChunk = { startSample: 0, endSample: 200 * 16000, silent: false };
+  session.chunkIndex.set(0, baseChunk);
+  const timeoutErr = Object.assign(new Error("Request timed out"), {
+    code: "TIMEOUT",
+  });
+
+  // 3 splits: 200s -> 100s -> 50s -> 25s (still > 10s, must stop at depth 3)
+  let current = baseChunk;
+  for (let depth = 0; depth < 3; depth++) {
+    expect(session.shouldSplitRemoteChunkOnError(timeoutErr, current)).toBe(
+      true
+    );
+    expect(session.splitChunkInIndex(current)).toBe(true);
+    current = session.chunkIndex.get(0);
+  }
+  expect(current.splitDepth).toBe(3);
+  expect((current.endSample - current.startSample) / 16000).toBeGreaterThan(10);
+  expect(session.shouldSplitRemoteChunkOnError(timeoutErr, current)).toBe(
+    false
+  );
+});

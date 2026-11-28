@@ -1787,7 +1787,7 @@ export class YouTubeCaptionProvider {
     }
     const { aiContextSlug } = this.#setting;
     const hasAiContext = Boolean(aiContextSlug && aiContextSlug !== "-");
-    if (hasAiContext && !this.#docInfo?.summary) {
+    if (hasAiContext && !this.#captionContextEnriched) {
       if (this.#captionContextPromise) {
         await this.#captionContextPromise.catch(() => {});
       } else {
@@ -2147,6 +2147,7 @@ export class YouTubeCaptionProvider {
     if (!this.#contextAbortController) {
       this.#contextAbortController = new AbortController();
     }
+    const contextSignal = this.#contextAbortController.signal;
 
     try {
       this.#playerUi.showNotification(this.#i18n("ai_context_analyzing"));
@@ -2157,15 +2158,17 @@ export class YouTubeCaptionProvider {
         description: this.#fullDescription || docInfo.description,
         transcript,
         apiSetting: contextApiSetting,
+        signal: contextSignal,
       });
 
       if (
         summary &&
         videoId === this.#videoId &&
         !this.#disposed &&
-        !this.#contextAbortController?.signal?.aborted
+        !contextSignal.aborted
       ) {
-        docInfo.summary = summary;
+        if (!this.#docInfo) this.#docInfo = {};
+        this.#docInfo.summary = summary;
         this.#captionContextEnriched = true;
       }
     } catch (err) {
@@ -2173,7 +2176,8 @@ export class YouTubeCaptionProvider {
         .child("subtitle")
         .warn("Youtube Provider: AI context enrichment failed", err);
     } finally {
-      if (!this.#docInfo?.summary && videoId === this.#videoId) {
+      // 不能仅判断 docInfo.summary（DOM 简介可能已填充该字段），应以 AI 上下文是否真正完成为准。
+      if (!this.#captionContextEnriched && videoId === this.#videoId) {
         this.#captionContextPromise = null;
       }
     }

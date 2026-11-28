@@ -11,36 +11,10 @@ import {
   getFromLang,
   splitEventsIntoChunks,
 } from "../youtubeSubtitleProcessing";
-import { aiSegment } from "../youtubeAiSegmentation";
-
-function selectPreviousSubtitlesContext(
-  cues,
-  nextChunkStartMs,
-  { maxCount = 4, maxGapMs = 15000 } = {}
-) {
-  if (!Array.isArray(cues) || !cues.length) return [];
-  const valid = cues.filter((cue) => cue?.text?.trim());
-  if (!valid.length) return [];
-  if (Number.isFinite(nextChunkStartMs)) {
-    const last = valid[valid.length - 1];
-    const lastEnd = Number(last?.end);
-    const lastStart = Number(last?.start);
-    if (
-      !Number.isFinite(lastEnd) ||
-      lastStart >= nextChunkStartMs ||
-      nextChunkStartMs - lastEnd > maxGapMs
-    ) {
-      return [];
-    }
-  }
-  return valid.slice(-maxCount).map((cue) => ({
-    text: cue.text.trim(),
-    translation:
-      typeof cue.translation === "string" && !cue._isDraftTranslation
-        ? cue.translation.trim()
-        : "",
-  }));
-}
+import {
+  aiSegment,
+  selectPreviousSubtitlesContext,
+} from "../youtubeAiSegmentation";
 import { getDocInfo } from "../../libs/docInfo";
 import { isSameLang } from "../youtubeCaptionTracks";
 import { isNonSpeechSegment } from "../subtitleTextClassification";
@@ -167,6 +141,7 @@ export function createAsrTextProcessor(setting, identity) {
         description: docInfo.description || "",
         transcript: segments.map((segment) => segment.text).join("\n"),
         apiSetting: context,
+        signal,
       });
       if (signal.aborted)
         throw signal.reason || new DOMException("Cancelled", "AbortError");

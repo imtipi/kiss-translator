@@ -1213,6 +1213,7 @@ export const apiSummarizeContext = async ({
   description,
   transcript,
   apiSetting,
+  signal,
 }) => {
   if (!supportsApiCapability(apiSetting, "summarize"))
     throw Object.assign(
@@ -1246,6 +1247,7 @@ export const apiSummarizeContext = async ({
     transcript,
     apiSetting,
     prompt: defaultContextSummaryPrompt,
+    signal,
   });
 
   if (summary) {

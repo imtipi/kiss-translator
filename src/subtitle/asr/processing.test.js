@@ -10,7 +10,10 @@ jest.mock("../../apis", () => ({
 jest.mock("../../libs/docInfo", () => ({
   getDocInfo: () => ({ title: "video" }),
 }));
-jest.mock("../youtubeAiSegmentation", () => ({ aiSegment: jest.fn() }));
+jest.mock("../youtubeAiSegmentation", () => ({
+  ...jest.requireActual("../youtubeAiSegmentation"),
+  aiSegment: jest.fn(),
+}));
 const identity = { videoId: "kSQknoHMFtk", sourceLanguage: "en" };
 const segments = [
   { start: 1, end: 2, text: "Hello." },
